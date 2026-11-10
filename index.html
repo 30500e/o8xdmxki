@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>カッパーマイン</title>
+<style>
+  html { background: #000; color-scheme: dark; }
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; font: 16px/1.6 "Yu Gothic UI", "Hiragino Sans", "Noto Sans JP", sans-serif; color: #fff; }
+  main { width: 92vw; max-width: 26em; padding: 24px 0; text-align: center; }
+  p { margin: 0 0 12px; }
+  #msg { white-space: pre-line; }
+  .bar { height: 8px; border: 1px solid #fff; margin: 14px 0; }
+  .bar i { display: block; height: 100%; width: 0; background: #fff; }
+  form { display: flex; margin-top: 14px; }
+  input { flex: 1; min-width: 0; margin-right: 8px; font: inherit; padding: 8px; color: #fff; background: #000; border: 1px solid #fff; border-radius: 0; }
+  button { font: inherit; padding: 8px 14px; color: #000; background: #fff; border: 1px solid #fff; border-radius: 0; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <p id="msg">読み込んでいます…</p>
+  <div class="bar" id="bar"><i></i></div>
+  <form id="ask" hidden>
+    <input id="key" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="鍵" placeholder="https://…">
+    <button>開く</button>
+  </form>
+  <p id="again" hidden><button type="button">もう一度</button></p>
+  <noscript><p>JavaScript を使えるようにしてから、開き直してください。</p></noscript>
+</main>
+<script>
+(function () {
+  'use strict';
+  var BIN = 'app-6708b2410f01.bin', SIZE = 10409072, LS = 'kappa-mine-web-key';
+  var $ = function (id) { return document.getElementById(id); };
+  var msg = $('msg'), bar = $('bar'), ask = $('ask'), again = $('again'), input = $('key');
+  var bytes = null, loading = null, waiting = '', tried = '';
+
+  function say(t) { msg.textContent = t; }
+  function fromB64(s) {
+    s = s.replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '=';
+    var b = atob(s), a = new Uint8Array(b.length), i; for (i = 0; i < b.length; i++) a[i] = b.charCodeAt(i); return a;
+  }
+  function label(t) { var a = new Uint8Array(t.length + 1), i; for (i = 0; i < t.length; i++) a[i] = t.charCodeAt(i); return a; }
+  function cat(a, b) { var o = new Uint8Array(a.length + b.length); o.set(a, 0); o.set(b, a.length); return o; }
+  function saved() { try { return localStorage.getItem(LS) || ''; } catch (e) { return ''; } }
+  function forget() { try { localStorage.removeItem(LS); } catch (e) { /* ignore */ } }
+  function pick(text) {
+    var m = /[#&]k=([A-Za-z0-9_-]{22})(?![A-Za-z0-9_-])/.exec(text); if (m) return m[1];
+    text = text.replace(/\s+/g, ''); return /^[A-Za-z0-9_-]{22}$/.test(text) ? text : '';
+  }
+  function progress(n) { bar.firstChild.style.width = Math.max(0, Math.min(100, n / SIZE * 100)).toFixed(1) + '%'; }
+
+  function load() {
+    if (bytes) return Promise.resolve(bytes);
+    if (loading) return loading;
+    loading = fetch(BIN).then(function (r) {
+      if (!r.ok) throw new Error('http ' + r.status);
+      if (!r.body || !r.body.getReader) return r.arrayBuffer().then(function (b) { return new Uint8Array(b); });
+      var rd = r.body.getReader(), parts = [], n = 0;
+      function step() {
+        return rd.read().then(function (x) {
+          if (x.done) { var o = new Uint8Array(n), at = 0, i; for (i = 0; i < parts.length; i++) { o.set(parts[i], at); at += parts[i].length; } return o; }
+          parts.push(x.value); n += x.value.length; progress(n); return step();
+        });
+      }
+      return step();
+    }).then(function (a) { progress(SIZE); bytes = a; loading = null; return a; }, function (e) { loading = null; throw e; });
+    return loading;
+  }
+
+  function unseal(key, a) {
+    var raw = fromB64(key), S = crypto.subtle;
+    if (a.length < 64) return Promise.reject(new Error('short'));
+    var body = a.subarray(0, a.length - 32), tag = a.subarray(a.length - 32);
+    return Promise.all([S.digest('SHA-256', cat(label('kappa-web enc'), raw)), S.digest('SHA-256', cat(label('kappa-web mac'), raw))]).then(function (k) {
+      return S.importKey('raw', k[1], { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']).then(function (mk) {
+        return S.verify('HMAC', mk, tag, body);
+      }).then(function (good) {
+        if (!good) { var e = new Error('key'); e.badKey = true; throw e; }
+        return S.importKey('raw', k[0], { name: 'AES-CBC' }, false, ['decrypt']);
+      }).then(function (ek) {
+        return S.decrypt({ name: 'AES-CBC', iv: body.subarray(0, 16) }, ek, body.subarray(16));
+      });
+    }).then(function (plain) { return new TextDecoder('utf-8').decode(plain); });
+  }
+
+  function askKey(text) {
+    say(text); bar.hidden = true; again.hidden = true; ask.hidden = false;
+    try { input.focus(); } catch (e) { /* ignore */ }
+  }
+  function open(key) {
+    tried = key; ask.hidden = true; again.hidden = true; bar.hidden = false; say('読み込んでいます…');
+    load().then(function (a) { return unseal(key, a); }).then(function (html) {
+      try { localStorage.setItem(LS, key); } catch (e) { /* ignore */ }
+      var s = /[#&](s=[^&]+)/.exec(location.hash);
+      try { history.replaceState(null, '', location.pathname + location.search + '#k=' + key + (s ? '&' + s[1] : '')); } catch (e) { /* ignore */ }
+      document.open(); document.write(html); document.close();
+    }).catch(function (e) {
+      if (e && e.badKey) {
+        if (saved() === key) forget();
+        askKey('鍵が合いません。\nもらった URL を、ここに貼ってください。');
+      } else if (bytes) {
+        say('開けませんでした。\nブラウザを新しくしてから、もう一度試してください。'); bar.hidden = true;
+      } else {
+        say('読み込めませんでした。\n電波のよい所で、もう一度試してください。'); bar.hidden = true; again.hidden = false;
+      }
+    });
+  }
+
+  ask.addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    var k = pick(input.value);
+    if (!k) { say('鍵を読み取れません。\nもらった URL を、そのまま貼ってください。'); return; }
+    open(k);
+  });
+  again.firstChild.addEventListener('click', function () { open(tried); });
+
+  if (!window.Promise || !window.fetch || !window.TextDecoder || !window.crypto || !crypto.subtle || typeof WebAssembly !== 'object') {
+    say('このブラウザでは開けません。\n新しい Safari か Chrome で開いてください。'); bar.hidden = true; return;
+  }
+  var first = pick(location.hash) || saved();
+  if (first) open(first);
+  else { load().catch(function () { /* ignore */ }); askKey('鍵が要ります。\nもらった URL を、ここに貼ってください。'); }
+})();
+</script>
+</body>
+</html>
